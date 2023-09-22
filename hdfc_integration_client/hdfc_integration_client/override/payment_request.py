@@ -22,6 +22,8 @@ class CustomPaymentRequest(PaymentRequest):
 		else:
 			if self.net_total and not self.grand_total:
 				self.grand_total = self.net_total
+			if self.grand_total and self.net_total != self.grand_total and not self.apply_tax_withholding_amount:
+				self.grand_total = self.net_total
 
 
 	def on_submit(self):

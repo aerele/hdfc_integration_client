@@ -4,23 +4,31 @@ import json
 import uuid, requests
 import random
 
-# from hdfc_integration_client.hdfc_integration_client.payments.payment import process_payment
-
 @frappe.whitelist()
 def make_bank_payment(docname):
+	if not frappe.has_permission("Payment Order", "write"):
+		frappe.throw("Not permitted", frappe.PermissionError)
+
 	payment_order_doc = frappe.get_doc("Payment Order", docname)
 	count = 0
 	for i in payment_order_doc.summary:
 		if not i.payment_initiated:
 			invoices = []
-			payment_response = process_payment(i, payment_order_doc.company_bank_account, invoices=invoices)
-			if "payment_status" in payment_response and payment_response["payment_status"] == "Initiated":
+			payment_response = process_payment(i, payment_order_doc.company_bank_account, payment_order_doc.company,  invoices=invoices)
+			if payment_response and "payment_status" in payment_response and payment_response["payment_status"] == "Initiated":
 				frappe.db.set_value("Payment Order Summary", i.name, "payment_initiated", 1)
 				frappe.db.set_value("Payment Order Summary", i.name, "payment_status", "Initiated")
+				frappe.db.set_value("Payment Order Summary", i.name, "payment_date", nowdate())
 				count += 1
+			elif payment_response and "payment_status" in payment_response and payment_response["payment_status"] == "":
+				if "message" in payment_response:
+					frappe.db.set_value("Payment Order Summary", i.name, "message", payment_response["message"])
 			else:
 				frappe.db.set_value("Payment Order Summary", i.name, "payment_status", "Failed")
-				if "message" in payment_response:
+				payment_entry_doc = frappe.get_doc("Payment Entry", i.payment_entry)
+				if payment_entry_doc.docstatus == 1:
+					payment_entry_doc.cancel()
+				if payment_response and "message" in payment_response:
 					frappe.db.set_value("Payment Order Summary", i.name, "message", payment_response["message"])
 
 	payment_order_doc.reload()
@@ -40,70 +48,8 @@ def get_payment_status(docname):
 	payment_order_doc = frappe.get_doc("Payment Order", docname)
 	for i in payment_order_doc.summary:
 		if i.payment_status == "Initiated":
-			payment_response = get_response(i)
+			payment_response = get_response(i, payment_order_doc.company_bank_account, payment_order_doc.company)
 	payment_order_doc.reload()
-
-
-
-def get_invoice_details(po_doc, summary_doc):
-	supplier = summary_doc.supplier
-	state = summary_doc.state
-	invoices = []
-	amount = 0
-	for ref in po_doc.references:
-		if ref.supplier == supplier and ref.state == state:
-			amount += ref.amount
-			if ref.reference_doctype and ref.reference_name and ref.reference_doctype == "Purchase Invoice":
-				posting_date = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "posting_date")
-				base_grand_total = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "base_grand_total")
-				base_taxes_and_charges_deducted = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "base_taxes_and_charges_deducted")
-				invoices.append({
-					"netAmount": str(ref.amount),
-					"invoiceNumber": str(ref.reference_name),
-					"invoiceDate": str(posting_date),
-					"tax": str(-base_taxes_and_charges_deducted if base_taxes_and_charges_deducted else 0),
-					"invoiceAmount": str((base_grand_total + base_taxes_and_charges_deducted) if base_taxes_and_charges_deducted else base_grand_total)
-				})
-			elif ref.reference_doctype and ref.reference_name and ref.reference_doctype == "Purchase Order":
-				transaction_date = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "transaction_date")
-				base_taxes_and_charges_deducted = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "base_taxes_and_charges_deducted")
-				base_grand_total = frappe.db.get_value(ref.reference_doctype, ref.reference_name, "base_grand_total")
-				invoices.append({
-					"netAmount": str(ref.amount),
-					"invoiceNumber": str(ref.reference_name),
-					"invoiceDate": str(transaction_date),
-					"tax": str(-base_taxes_and_charges_deducted if base_taxes_and_charges_deducted else 0),
-					"invoiceAmount": str((base_grand_total + base_taxes_and_charges_deducted) if base_taxes_and_charges_deducted else base_grand_total)
-				})
-	
-	if amount == summary_doc.amount and len(invoices):
-		return invoices
-
-@frappe.whitelist()
-def modify_approval_status(items, approval_status):
-	if not items:
-		return
-	
-	if isinstance(items, str):
-		items = json.loads(items)
-	line_item_status = {}
-	for item in items:
-		line_item_status[item] = {"status": None, "message": ""}
-		pos_doc = frappe.get_doc("Payment Order Summary", item)
-		if pos_doc.payment_initiated:
-			line_item_status[item] = {"status": 0, "message": f"Payment already initiated for {pos_doc.supplier} - {pos_doc.amount}"}
-			continue
-		if pos_doc.payment_rejected:
-			line_item_status[item] = {"status": 0, "message": f"Payment already rejected for {pos_doc.supplier} - {pos_doc.amount}"}
-			continue
-		frappe.db.set_value("Payment Order Summary", item, "approval_status", approval_status)
-		line_item_status[item] = {
-			"status": 1, 
-			"message": approval_status
-		}
-
-	return line_item_status
-
 
 @frappe.whitelist()
 def make_payment_entries(docname):
@@ -191,26 +137,35 @@ def make_payment_entries(docname):
 		pe.submit()
 		frappe.db.set_value("Payment Order Summary", row.name, "payment_entry", pe.name)
 
+def process_payment(payment_info, company_bank_account, company, invoices = None):
+	# Fetch the connector information
+	bank_connector = frappe.get_doc("Bank Connector", {"company": company, "bank_account": company_bank_account})
 
-@frappe.whitelist()
-def log_payload(docname):
-	payment_order_doc = frappe.get_doc("Payment Order", docname)
-	for row in payment_order_doc.summary:
-		short_code = frappe.db.get_value("Bank Integration Mode", {"parent": payment_order_doc.company_bank_account, "mode_of_transfer": row.mode_of_transfer}, "short_code")
-		bank_account = frappe.get_doc("Bank Account", row.bank_account)
-		brl = frappe.new_doc("Bank API Request Log")
-		brl.payment_order = payment_order_doc.name
-		brl.payload = json.dumps()
-		brl.status = "Initiated"
-		brl.save()
-		brl.submit()
+	if not bank_connector:
+		frappe.throw("Bank Connector is not initialized")
 
-def process_payment(payment_info, company_bank_account, invoices = None):
-	batch_number = str(random.randint(1000,999999))
 	payment_payload = frappe._dict({})
+
+	# Unique reference to this payment.
 	payment_payload.name = payment_info.name
+
+	# Party information
 	payment_payload.party = payment_info.party
-	payment_payload.batch = batch_number
+	party_name = ""
+	if payment_info.party_type == "Supplier":
+		party_name = frappe.db.get_value("Supplier", payment_info.party, "supplier_name")
+	payment_payload.party_name = party_name
+	payment_payload.desc = f"Payment to {payment_info.party} via {payment_info.parent}"
+
+	# Party's account information
+	bank_account_doc = frappe.get_doc("Bank Account", payment_info.bank_account)
+	payment_payload.account_number = bank_account_doc.bank_account_no
+	payment_payload.ifsc = bank_account_doc.branch_code
+
+	# Payment details
+	payment_payload.amount = payment_info.amount
+	batch_number = str(random.randint(100,999))
+	payment_payload.batch = batch_number + "0" + payment_info.parent[-2:]
 	payment_payload.mode_of_transfer = payment_info.mode_of_transfer
 	if payment_info.mode_of_transfer == "RTGS" and payment_info.amount >= 500000000:
 		lei_number = frappe.db.get_value(payment_info.party_type, payment_info.party, "custom_lei_number")
@@ -220,14 +175,23 @@ def process_payment(payment_info, company_bank_account, invoices = None):
 			frappe.throw("LEI Number required for payment > 50 Cr")
 	else:
 		payment_payload.lei_number = ""
-	bank_account_doc = frappe.get_doc("Bank Account", payment_info.bank_account)
-	payment_payload.account_number = bank_account_doc.bank_account_no
-	payment_payload.ifsc = bank_account_doc.branch_code
-	payment_payload.amount = payment_info.amount
-	url = "https://bank-integration.8848digitalerp.com/api/method/hdfc_integration_server.hdfc_integration_server.doctype.bank_request_log.bank_request_log.make_payment"
 
+	# Company bank accoount information
+	company_bank_account_doc = frappe.get_doc("Bank Account", company_bank_account)
+	payment_payload.company_account_number = company_bank_account_doc.bank_account_no
+	payment_payload.company_ifsc = company_bank_account_doc.branch_code
+	payment_payload.company = company
+
+	if not company_bank_account_doc.bank_account_no:
+		frappe.throw("Source bank account number is missing")
+
+	url = f"{bank_connector.url}/api/method/hdfc_integration_server.hdfc_integration_server.doctype.bank_request_log.bank_request_log.make_payment"
+
+	api_key = bank_connector.api_key
+	api_secret = bank_connector.get_password("api_secret")
 	headers = {
-		'Content-Type': 'application/json',
+		"Authorization": f"token {api_key}:{api_secret}",
+		"Content-Type": "application/json",
 	}
 
 	response = requests.request("POST", url, headers=headers, data=json.dumps({"payload": payment_payload}))
@@ -239,21 +203,36 @@ def process_payment(payment_info, company_bank_account, invoices = None):
 				return {"payment_status": "Initiated", "message": ""}
 			else:
 				return {"payment_status": "Failed", "message": response_data["message"]["status"]}
+	else:
+		return {"payment_status": "", "message": ""}
 
-def get_response(payment_info):
-	url = "https://bank-integration.8848digitalerp.com/api/method/hdfc_integration_server.hdfc_integration_server.doctype.bank_request_log.bank_request_log.get_payment_status"
-	batch_number = str(random.randint(1000,999999))
+def get_response(payment_info, company_bank_account, company):
+	bank_connector = frappe.get_doc("Bank Connector", {"company": company, "bank_account": company_bank_account})
+
+	if not bank_connector:
+		frappe.throw("Bank Connector is not initialized")
+
+	url = f"{bank_connector.url}/api/method/hdfc_integration_server.hdfc_integration_server.doctype.bank_request_log.bank_request_log.get_payment_status"
+
+	api_key = bank_connector.api_key
+	api_secret = bank_connector.get_password("api_secret")
+	headers = {
+		"Authorization": f"token {api_key}:{api_secret}",
+		"Content-Type": "application/json",
+	}
+
+	batch_number = str(random.randint(100,999))
 	payload = {
 		"status_payload": {
-			"batch": batch_number,
+			"batch": batch_number + "0" + payment_info.parent[-2:],
 			"name": payment_info.name,
-			"mode_of_transfer": payment_info.mode_of_transfer
+			"mode_of_transfer": payment_info.mode_of_transfer,
+			"payment_date": str(payment_info.payment_date)
 		}
 	}
-	headers = {
-		'Content-Type': 'application/json',
-	}
+
 	response = requests.request("POST", url, headers=headers, data=json.dumps(payload))
+
 	if response.status_code == 200:
 		response_data = json.loads(response.text)
 		if "message" in response_data and response_data["message"]:
@@ -265,8 +244,11 @@ def get_response(payment_info):
 			elif "status" in response_data["message"] and response_data["message"]["status"] == "Failed":
 				frappe.db.set_value("Payment Order Summary", payment_info.name, "payment_status", response_data["message"]["status"])
 				payment_entry_doc = frappe.get_doc("Payment Entry", payment_info.payment_entry)
-				payment_entry_doc.cancel()
+				if payment_entry_doc.docstatus == 1:
+					payment_entry_doc.cancel()
 			elif "status" in response_data["message"] and response_data["message"]["status"] == "Rejected":
 				frappe.db.set_value("Payment Order Summary", payment_info.name, "payment_status", response_data["message"]["status"])
 				payment_entry_doc = frappe.get_doc("Payment Entry", payment_info.payment_entry)
+				if payment_entry_doc.docstatus == 1:
+					payment_entry_doc.cancel()
 				payment_entry_doc.cancel()

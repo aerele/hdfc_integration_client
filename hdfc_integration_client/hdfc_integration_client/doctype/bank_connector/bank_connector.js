@@ -1,15 +1,15 @@
 // Copyright (c) 2023, Aerele Technologies Private Limited and contributors
 // For license information, please see license.txt
 
-frappe.ui.form.on('Payment Type', {
-	onload: function (frm) {
-		frm.set_query("account", function (doc) {
+frappe.ui.form.on("Bank Connector", {
+	onload(frm) {
+		frm.set_query("bank_account", function (doc) {
 			return {
 				filters: {
-					is_group: 0,
 					company: doc.company,
+					is_company_account: 1
 				},
 			};
 		});
-	},
+	}
 });

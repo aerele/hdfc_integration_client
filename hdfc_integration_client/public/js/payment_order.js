@@ -2,6 +2,15 @@ frappe.ui.form.on('Payment Order', {
 	onload(frm) {
 		frm.set_df_property("payment_order_type", "options", [""].concat(["Payment Request", "Payment Entry", "Purchase Invoice"]));
 		frm.refresh_field("payment_order_type");
+
+		frm.set_query("company_bank_account", function (doc) {
+			return {
+				filters: {
+					company: doc.company,
+					is_company_account: 1
+				},
+			};
+		});
 	},
 	refresh(frm) {
 		frm.set_df_property('summary', 'cannot_delete_rows', true);
