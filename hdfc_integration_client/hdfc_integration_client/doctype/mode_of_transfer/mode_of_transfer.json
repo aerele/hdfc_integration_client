@@ -63,11 +63,9 @@
    "options": "Bank"
   },
   {
-   "depends_on": "eval:doc.is_bank_specific",
    "fieldname": "bank_account",
    "fieldtype": "Link",
    "label": "Bank Account",
-   "mandatory_depends_on": "eval:doc.is_bank_specific",
    "options": "Bank Account"
   },
   {
