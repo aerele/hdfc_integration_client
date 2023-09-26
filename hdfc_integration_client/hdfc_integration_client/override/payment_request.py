@@ -1,7 +1,8 @@
 import frappe
-from erpnext.accounts.doctype.payment_request.payment_request import PaymentRequest
+from erpnext.accounts.doctype.payment_request.payment_request import PaymentRequest, get_existing_payment_request_amount
 from erpnext.accounts.doctype.tax_withholding_category.tax_withholding_category import get_party_tax_withholding_details
 from frappe import _
+from frappe.utils import flt, today
 
 class CustomPaymentRequest(PaymentRequest):
 	def validate(self):
@@ -25,6 +26,26 @@ class CustomPaymentRequest(PaymentRequest):
 			if self.grand_total and self.net_total != self.grand_total and not self.apply_tax_withholding_amount:
 				self.grand_total = self.net_total
 
+	def validate_payment_request_amount(self):
+		existing_payment_request_amount = flt(
+			get_existing_payment_request_amount(self.reference_doctype, self.reference_name)
+		)
+
+		ref_doc = frappe.get_doc(self.reference_doctype, self.reference_name)
+		if not hasattr(ref_doc, "order_type") or getattr(ref_doc, "order_type") != "Shopping Cart":
+			if self.reference_doctype in ["Purchase Order"]:
+				ref_amount = flt(ref_doc.rounded_total) or flt(ref_doc.grand_total)
+			elif self.reference_doctype in ["Purchase Invoice"]:
+				ref_amount = flt(ref_doc.base_rounded_total)
+			else:
+				ref_amount = get_amount(ref_doc, self.payment_account)
+
+			if existing_payment_request_amount + flt(self.grand_total) > ref_amount:
+				frappe.throw(
+					_("Total Payment Request amount cannot be greater than {0} amount").format(
+						self.reference_doctype
+					)
+				)
 
 	def on_submit(self):
 		debit_account = None
@@ -78,7 +99,13 @@ def make_payment_request(**args):
 	ref_doc = frappe.get_doc(args.dt, args.dn)
 	gateway_account = get_gateway_details(args) or frappe._dict()
 
-	grand_total = get_amount(ref_doc, gateway_account.get("payment_account"))
+	if args.dt in ["Purchase Order"]:
+		grand_total = flt(ref_doc.rounded_total) or flt(ref_doc.grand_total)
+	elif args.dt in ["Purchase Invoice"]:
+		grand_total = flt(ref_doc.base_rounded_total)
+	else:
+		grand_total = get_amount(ref_doc, gateway_account.get("payment_account"))
+
 	if args.loyalty_points and args.dt == "Sales Order":
 		from erpnext.accounts.doctype.loyalty_program.loyalty_program import validate_loyalty_points
 
@@ -125,8 +152,10 @@ def make_payment_request(**args):
 				"payment_channel": gateway_account.get("payment_channel"),
 				"payment_request_type": args.get("payment_request_type"),
 				"currency": ref_doc.currency,
+				"company": ref_doc.company,
 				"grand_total": grand_total,
-				"mode_of_payment": args.mode_of_payment,
+				"mode_of_payment": "Wire Transfer",
+				"transaction_date": today(),
 				"email_to": args.recipient_id or ref_doc.owner,
 				"subject": _("Payment Request for {0}").format(args.dn),
 				"message": gateway_account.get("message") or get_dummy_message(ref_doc),

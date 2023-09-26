@@ -221,13 +221,15 @@ def get_response(payment_info, company_bank_account, company):
 		"Content-Type": "application/json",
 	}
 
+	company_bank_account_doc = frappe.get_doc("Bank Account", company_bank_account)
 	batch_number = str(random.randint(100,999))
 	payload = {
 		"status_payload": {
 			"batch": batch_number + "0" + payment_info.parent[-2:],
 			"name": payment_info.name,
 			"mode_of_transfer": payment_info.mode_of_transfer,
-			"payment_date": str(payment_info.payment_date)
+			"payment_date": str(payment_info.payment_date),
+			"company_account_number": company_bank_account_doc.bank_account_no
 		}
 	}
 
@@ -251,4 +253,3 @@ def get_response(payment_info, company_bank_account, company):
 				payment_entry_doc = frappe.get_doc("Payment Entry", payment_info.payment_entry)
 				if payment_entry_doc.docstatus == 1:
 					payment_entry_doc.cancel()
-				payment_entry_doc.cancel()
