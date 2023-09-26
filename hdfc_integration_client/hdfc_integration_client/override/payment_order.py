@@ -56,8 +56,10 @@ class CustomPaymentOrder(PaymentOrder):
 
 
 	def before_cancel(self):
-		frappe.throw("You cannot cancel a payment order")
-		return
+		for summary_item in self.summary:
+			if summary_item.payment_status in ["Processed", "Initiated"]:
+				frappe.throw("You cannot cancel a payment order with Initiated/Processed payments")
+				return
 	
 	def on_trash(self):
 		if self.docstatus == 1:

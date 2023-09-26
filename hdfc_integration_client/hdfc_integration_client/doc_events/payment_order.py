@@ -12,7 +12,7 @@ def make_bank_payment(docname):
 	payment_order_doc = frappe.get_doc("Payment Order", docname)
 	count = 0
 	for i in payment_order_doc.summary:
-		if not i.payment_initiated:
+		if not i.payment_initiated and i.payment_status == "Pending":
 			invoices = []
 			payment_response = process_payment(i, payment_order_doc.company_bank_account, payment_order_doc.company,  invoices=invoices)
 			if payment_response and "payment_status" in payment_response and payment_response["payment_status"] == "Initiated":
@@ -28,6 +28,7 @@ def make_bank_payment(docname):
 				payment_entry_doc = frappe.get_doc("Payment Entry", i.payment_entry)
 				if payment_entry_doc.docstatus == 1:
 					payment_entry_doc.cancel()
+				process_payment_requests(i.name)
 				if payment_response and "message" in payment_response:
 					frappe.db.set_value("Payment Order Summary", i.name, "message", payment_response["message"])
 
@@ -248,8 +249,27 @@ def get_response(payment_info, company_bank_account, company):
 				payment_entry_doc = frappe.get_doc("Payment Entry", payment_info.payment_entry)
 				if payment_entry_doc.docstatus == 1:
 					payment_entry_doc.cancel()
+				process_payment_requests(payment_info.name)
 			elif "status" in response_data["message"] and response_data["message"]["status"] == "Rejected":
 				frappe.db.set_value("Payment Order Summary", payment_info.name, "payment_status", response_data["message"]["status"])
 				payment_entry_doc = frappe.get_doc("Payment Entry", payment_info.payment_entry)
 				if payment_entry_doc.docstatus == 1:
 					payment_entry_doc.cancel()
+				process_payment_requests(payment_info.name)
+
+def process_payment_requests(payment_order_summary):
+	pos = frappe.get_doc("Payment Order Summary", payment_order_summary)
+	payment_order_doc = frappe.get_doc("Payment Order", pos.parent)
+
+	key = (pos.party_type, pos.party, pos.bank_account, pos.account, pos.state, pos.cost_center, pos.project, pos.tax_withholding_category, pos.reference_doctype)
+	failed_prs = []
+	for ref in payment_order_doc.references:
+		if key == (ref.party_type, ref.party, ref.bank_account, ref.account, ref.state, ref.cost_center, ref.project, ref.tax_withholding_category, ref.reference_doctype):
+			failed_prs.append(ref.payment_request)
+	
+	for pr in failed_prs:
+		pr_doc = frappe.get_doc("Payment Request", pr)
+		if pr_doc.docstatus == 1:
+			pr_doc.check_if_payment_entry_exists()
+			pr_doc.set_as_cancelled()
+			pr_doc.db_set("docstatus", 2)
