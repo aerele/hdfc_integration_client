@@ -134,7 +134,10 @@ def make_payment_entries(docname):
 		)
 		pe.setup_party_account_field()
 		pe.set_missing_values()
-		pe.insert(ignore_permissions=True)
+		pe.validate()
+		pe.insert(ignore_permissions=True, ignore_mandatory=True)
+		for idx, item in enumerate(pe.taxes):
+			pe.taxes[idx].state = row.state
 		pe.submit()
 		frappe.db.set_value("Payment Order Summary", row.name, "payment_entry", pe.name)
 
